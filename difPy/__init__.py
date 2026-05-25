@@ -1,2 +1,5 @@
+from .build import build
+from .search import search
 from .version import __version__
-from .dif import build, search
+
+__all__ = ["__version__", "build", "search"]
