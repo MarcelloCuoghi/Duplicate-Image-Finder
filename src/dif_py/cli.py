@@ -7,8 +7,8 @@ from typing import Annotated, Optional
 
 import typer
 
-from .build import build
-from .search import search
+from dif_py.build import build
+from dif_py.search import search
 
 app = typer.Typer(
     help="Find duplicate or similar images with difPy - "

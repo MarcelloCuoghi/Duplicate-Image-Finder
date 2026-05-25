@@ -10,9 +10,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from ._internal import validators
-from ._internal.stats import build_stats as _generate_build_stats
-from ._internal.utils import initialize_multiprocessing, progress_bar
+from dif_py._internal import validators
+from dif_py._internal.stats import build_stats as _generate_build_stats
+from dif_py._internal.utils import initialize_multiprocessing, progress_bar
 
 VALID_EXTENSIONS = frozenset([
     "apng",

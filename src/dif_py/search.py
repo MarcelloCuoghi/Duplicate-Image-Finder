@@ -10,15 +10,15 @@ from pathlib import Path
 
 import numpy as np
 
-from ._internal import validators
-from ._internal.compare import (
+from dif_py._internal import validators
+from dif_py._internal.compare import (
     check_equality,
     compare_shape,
     compute_mse,
     sort_imgs_by_size,
 )
-from ._internal.stats import search_stats as _generate_search_stats
-from ._internal.utils import initialize_multiprocessing, progress_bar
+from dif_py._internal.stats import search_stats as _generate_search_stats
+from dif_py._internal.utils import initialize_multiprocessing, progress_bar
 
 
 class search:
