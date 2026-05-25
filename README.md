@@ -36,7 +36,7 @@ difPy searches for images in **one or more different folders**, compares the ima
 
 difPy does not compare images based on their hashes. It compares them based on their tensors i. e. the image content - this allows difPy to **not only search for duplicate images, but also for similar images**.
 
-difPy leverages Python's **multiprocessing capabilities** and is therefore able to perform at high performance even on large datasets. 
+difPy leverages Python's **multiprocessing capabilities** and is therefore able to perform at high performance even on large datasets.
 
 :notebook: For a **detailed usage guide**, please view the official **[difPy Usage Documentation](https://difpy.readthedocs.io/)**.
 
@@ -54,21 +54,21 @@ To make difPy search for duplicates **within one folder**:
 import difPy
 dif = difPy.build('C:/Path/to/Folder/')
 search = difPy.search(dif)
-``` 
+```
 To search for duplicates **within multiple folders**:
 
 ```python
 import difPy
 dif = difPy.build(['C:/Path/to/Folder_A/', 'C:/Path/to/Folder_B/', 'C:/Path/to/Folder_C/', ... ])
 search = difPy.search(dif)
-``` 
+```
 
 Folder paths can be specified as standalone Python strings, or within a list. With `difPy.build()`, difPy first scans the images in the provided folders and builds a collection of images by generating image tensors. `difPy.search()` then starts the search for duplicate images.
 
 :notebook: For a **detailed usage guide**, please view the official **[difPy Usage Documentation](https://difpy.readthedocs.io/)**.
 
 ## Output
-difPy returns various types of output that you may use depending on your use case: 
+difPy returns various types of output that you may use depending on your use case:
 
 ### I. Search Result
 A **JSON formatted collection** of duplicates/similar images (i. e. **match groups**) that were found. Each match group has a primary image (the key of the dictionary) which holds the list of its duplicates including their filename and MSE (Mean Squared Error). The lower the MSE, the more similar the primary image and the matched images are. Therefore, an MSE of 0 indicates that two images are exact duplicates.
@@ -77,23 +77,23 @@ A **JSON formatted collection** of duplicates/similar images (i. e. **match grou
 search.result
 
 > Output:
-{'C:/Path/to/Image/image1.jpg' : [['C:/Path/to/Image/duplicate_image1a.jpg', 0.0], 
+{'C:/Path/to/Image/image1.jpg' : [['C:/Path/to/Image/duplicate_image1a.jpg', 0.0],
                                   ['C:/Path/to/Image/duplicate_image1b.jpg', 0.0]],
  'C:/Path/to/Image/image2.jpg' : [['C:/Path/to/Image/duplicate_image2a.jpg', 0.0]],
  ...
 }
-``` 
+```
 
 ### II. Lower Quality Files
-A **list** of duplicates/similar images that have the **lowest quality** (image resolution) among match groups: 
+A **list** of duplicates/similar images that have the **lowest quality** (image resolution) among match groups:
 
 ```python
 search.lower_quality
 
 > Output:
-['C:/Path/to/Image/duplicate_image1.jpg', 
+['C:/Path/to/Image/duplicate_image1.jpg',
  'C:/Path/to/Image/duplicate_image2.jpg', ...]
-``` 
+```
 
 Lower quality images then can be **moved** to a different location:
 
@@ -132,10 +132,10 @@ search.stats
                                        'processes': 5,
                                        'chunksize': None},
                         'files_searched': 3232,
-                        'matches_found': {'duplicates': 3030, 
+                        'matches_found': {'duplicates': 3030,
                                           'similar': 0}}},
  'total_files': {'count': 3232},
- 'invalid_files': {'count': 0, 
+ 'invalid_files': {'count': 0,
                    'logs': {}}}
 ```
 
@@ -143,12 +143,12 @@ search.stats
 difPy supports the following parameters:
 
 ```python
-difPy.build(*directory, recursive=True, in_folder=False, limit_extensions=True, px_size=50, 
+difPy.build(*directory, recursive=True, in_folder=False, limit_extensions=True, px_size=50,
             show_progress=True, processes=os.cpu_count())
 ```
 
 ```python
-difPy.search(difpy_obj, similarity='duplicates', rotate=True, same_dim=True, show_progress=True, 
+difPy.search(difpy_obj, similarity='duplicates', rotate=True, same_dim=True, show_progress=True,
              processes=os.cpu_count(), chunksize=None)
 ```
 
@@ -157,37 +157,41 @@ difPy.search(difpy_obj, similarity='duplicates', rotate=True, same_dim=True, sho
 ## CLI Usage
 difPy can also be invoked through the CLI by using the following commands:
 
-```python
-python dif.py #working directory
+```sh
+python -m difPy  # working directory
 
-python dif.py -D 'C:/Path/to/Folder/'
+python -m difPy -D 'C:/Path/to/Folder/'
 
-python dif.py -D 'C:/Path/to/Folder_A/' 'C:/Path/to/Folder_B/' 'C:/Path/to/Folder_C/'
+python -m difPy -D 'C:/Path/to/Folder_A/' 'C:/Path/to/Folder_B/' 'C:/Path/to/Folder_C/'
 ```
 
-> :point_right: Windows users can add difPy to their [PATH system variables](https://www.computerhope.com/issues/ch000549.htm) by pointing it to their difPy package installation folder containing the [`difPy.bat`](https://github.com/elisemercury/Duplicate-Image-Finder/difPy/difPy.bat) file. This adds `difPy` as a command in the CLI and will allow direct invocation of `difPy` from anywhere on the device.
+If the package is installed via pip/uv, the `difpy` command is also available directly:
+
+```sh
+difpy -D 'C:/Path/to/Folder/'
+```
 
 difPy CLI supports the following arguments:
 
 ```python
-dif.py [-h] [-D DIRECTORY [DIRECTORY ...]] [-Z OUTPUT_DIRECTORY] 
-       [-r {True,False}] [-i {True,False}] [-le {True,False}] 
+difpy [-h] [-D DIRECTORY [DIRECTORY ...]] [-Z OUTPUT_DIRECTORY]
+       [-r {True,False}] [-i {True,False}] [-le {True,False}]
        [-px PX_SIZE]  [-s SIMILARITY] [-ro {True,False}]
-       [-dim {True,False}] [-proc PROCESSES] [-ch CHUNKSIZE] 
+       [-dim {True,False}] [-proc PROCESSES] [-ch CHUNKSIZE]
        [-mv MOVE_TO] [-d {True,False}] [-sd {True,False}]
        [-p {True,False}]
 ```
 
-| | Parameter | | Parameter |
-| :---: | ------ | :---: | ------ | 
-| `-D` | directory | `-dim` | same_dim |
-| `-Z` | output_directory | `-proc` | processes | 
-| `-r`| recursive | `-ch` | chunksize |
-| `-i`| in_folder | `-mv` | move_to |
-| `-le` | limit_extensions | `-d` | delete |
-| `-px` | px_size | `-sd` | silent_del |
-| `-s`| similarity | `-p` | show_progress | 
-| `-ro` | rotate | 
+|       | Parameter        |         | Parameter     |
+| :---: | ---------------- | :-----: | ------------- |
+| `-D`  | directory        | `-dim`  | same_dim      |
+| `-Z`  | output_directory | `-proc` | processes     |
+| `-r`  | recursive        |  `-ch`  | chunksize     |
+| `-i`  | in_folder        |  `-mv`  | move_to       |
+| `-le` | limit_extensions |  `-d`   | delete        |
+| `-px` | px_size          |  `-sd`  | silent_del    |
+| `-s`  | similarity       |  `-p`   | show_progress |
+| `-ro` | rotate           |
 
 If no directory parameter is given in the CLI, difPy will **run on the current working directory**.
 
@@ -203,7 +207,7 @@ difPy_xxx_stats.json
 
 ## difPy for Desktop
 
-The new difPy desktop app brings difPy directly to your desktop. 
+The new difPy desktop app brings difPy directly to your desktop.
 
 ✨🚀 [difPy for Desktop](https://go.difpy.app/desktop) is now **available for download** in the [Microsoft Store](https://go.difpy.app/desktop)!
 

@@ -5,26 +5,28 @@ CLI Usage
 
 difPy can be invoked through a CLI interface by using the following commands:
 
-.. code-block:: python
+.. code-block:: sh
 
-   python dif.py #working directory
+   python -m difPy  # working directory
 
-   python dif.py -D 'C:/Path/to/Folder/'
+   python -m difPy -D 'C:/Path/to/Folder/'
 
-   python dif.py -D 'C:/Path/to/Folder_A/' 'C:/Path/to/Folder_B/' 'C:/Path/to/Folder_C/'
+   python -m difPy -D 'C:/Path/to/Folder_A/' 'C:/Path/to/Folder_B/' 'C:/Path/to/Folder_C/'
 
-.. note::
+If the package is installed via pip/uv, the ``difpy`` command is also available directly:
 
-   Windows users can add difPy to their `PATH system variables <https://www.computerhope.com/issues/ch000549.htm>`_ by pointing it to their difPy package installation folder containing the `difPy.bat <https://github.com/elisemercury/Duplicate-Image-Finder/blob/main/difPy/difPy.bat>`_ file. This adds ``difPy`` as a command in the CLI and will allow direct invocation of difPy from anywhere on the machine. The default difPy installation folder will look similar to ``C:\Users\User\AppData\Local\Programs\Python\Python311\Lib\site-packages\difPy`` (Windows 11).
+.. code-block:: sh
+
+   difpy -D 'C:/Path/to/Folder/'
 
 difPy in the CLI supports the following arguments:
 
 .. code-block:: python
-   
-   dif.py [-h] [-D DIRECTORY [DIRECTORY ...]] [-Z OUTPUT_DIRECTORY] 
-          [-r {True,False}] [-i {True,False}] [-le {True,False}] 
+
+   difpy [-h] [-D DIRECTORY [DIRECTORY ...]] [-Z OUTPUT_DIRECTORY]
+          [-r {True,False}] [-i {True,False}] [-le {True,False}]
           [-px PX_SIZE]  [-s SIMILARITY] [-ro {True,False}]
-          [-dim {True,False}] [-proc PROCESSES] [-ch CHUNKSIZE] 
+          [-dim {True,False}] [-proc PROCESSES] [-ch CHUNKSIZE]
           [-mv MOVE_TO] [-d {True,False}] [-sd {True,False}]
           [-p {True,False}]
 
