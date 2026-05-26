@@ -4,7 +4,12 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = ["numpy>=2.4.6", "pillow>=12.2.0", "typer>=0.15.0"]
+dependencies = [
+    "numpy>=2.4.6",
+    "pillow>=12.2.0",
+    "tqdm>=4.67.3",
+    "typer>=0.15.0",
+]
 
 [project.scripts]
 difpy = "dif_py.cli:main"

@@ -10,15 +10,104 @@ from pathlib import Path
 
 import numpy as np
 
+from tqdm import tqdm
+
 from dif_py._internal import validators
 from dif_py._internal.compare import (
     check_equality,
-    compare_shape,
     compute_mse,
     sort_imgs_by_size,
 )
 from dif_py._internal.stats import search_stats as _generate_search_stats
-from dif_py._internal.utils import initialize_multiprocessing, progress_bar
+from dif_py._internal.utils import initialize_multiprocessing
+
+# ---------------------------------------------------------------------------
+# Module-level worker state — populated once per worker process via the pool
+# initializer.  Avoids pickling `self` (and its large tensor dictionaries)
+# for every individual comparison task.
+# ---------------------------------------------------------------------------
+
+_worker_state: dict = {}
+
+
+def _init_worker(
+    tensor_dict, checksum_dict, norm_shape_dict, similarity, rotate, same_dim
+):
+    """Populate per-process globals once at pool start-up."""
+    global _worker_state
+    _worker_state = {
+        "tensor": tensor_dict,
+        "checksum": checksum_dict,
+        "shape": norm_shape_dict,
+        "similarity": similarity,
+        "rotate": rotate,
+        "same_dim": same_dim,
+    }
+
+
+def _find_matches_worker(ids: tuple):
+    """Pairwise image comparison — module-level function for picklability."""
+    id_A, id_B = ids
+    s = _worker_state
+
+    # Shape guard (fast dict lookup; pairs from same-dim generators already
+    # satisfy this, but it acts as a safety net for the batch path).
+    if s["same_dim"] and s["shape"][id_A] != s["shape"][id_B]:
+        return None
+
+    # Fast exact-match check via pre-computed checksum, then full equality.
+    if s["checksum"][id_A] == s["checksum"][id_B] and check_equality(
+        s["tensor"][id_A], s["tensor"][id_B]
+    ):
+        return (id_A, id_B, 0.0)
+
+    # Skip MSE entirely when only exact duplicates are requested.
+    if s["similarity"] == 0:
+        return None
+
+    mse = compute_mse(s["tensor"][id_A], s["tensor"][id_B], rotate=s["rotate"])
+    if mse <= s["similarity"]:
+        return (id_A, id_B, float(mse))
+    return None
+
+
+def _find_matches_batch_worker(group: list) -> list:
+    """Batch image comparison for large datasets — module-level function."""
+    s = _worker_state
+    result = []
+    id_A = group[0][0]
+    tensor_A = s["tensor"][id_A]
+    chk_A = s["checksum"][id_A]
+
+    ids_B = np.asarray([pair[1] for pair in group])
+
+    # Shape filter — eliminate candidates with incompatible dimensions.
+    if s["same_dim"]:
+        shape_A = s["shape"][id_A]
+        mask = np.asarray([s["shape"][ib] == shape_A for ib in ids_B])
+        ids_B = ids_B[mask]
+        if ids_B.size == 0:
+            return result
+
+    # Exact-match detection via checksum equality.
+    checksums_B = np.asarray([s["checksum"][ib] for ib in ids_B])
+    eq_mask = checksums_B == chk_A
+    for id_B in ids_B[np.where(eq_mask)[0]]:
+        if check_equality(tensor_A, s["tensor"][id_B]):
+            result.append((id_A, id_B, 0.0))
+
+    if s["similarity"] > 0:
+        neq_ids = ids_B[~eq_mask]
+        if neq_ids.size > 0:
+            mses = np.asarray([
+                compute_mse(tensor_A, s["tensor"][ib], rotate=s["rotate"])
+                for ib in neq_ids
+            ])
+            sim_indices = np.where(mses <= s["similarity"])[0]
+            for idx in sim_indices:
+                result.append((id_A, neq_ids[idx], float(mses[idx])))
+
+    return result
 
 
 class search:
@@ -42,6 +131,10 @@ class search:
         Batch size for multiprocessing with large datasets (> 5k images).
     """
 
+    # Number of images above which streaming batch mode is used instead of
+    # enumerating all pairs in memory upfront.
+    _BATCH_THRESHOLD = 5_000
+
     def __init__(
         self,
         difpy_obj,
@@ -49,7 +142,7 @@ class search:
         rotate=True,
         same_dim=True,
         show_progress=True,
-        processes=os.cpu_count(),
+        processes=None,
         chunksize=None,
     ):
         self._difpy_obj = difpy_obj
@@ -57,6 +150,8 @@ class search:
         self._rotate = validators.validate_rotate(rotate)
         self._same_dim = validators.validate_same_dim(same_dim, self._similarity)
         self._show_progress = validators.validate_show_progress(show_progress)
+        if processes is None:
+            processes = os.cpu_count() or 1
         self._processes = validators.validate_processes(processes)
         self._chunksize = validators.validate_chunksize(chunksize)
         self._in_folder = self._difpy_obj.stats["process"]["build"]["parameters"][
@@ -65,13 +160,49 @@ class search:
 
         initialize_multiprocessing()
 
-        if self._show_progress:
-            print("Initializing search...", end="\r")
         self.result, self.lower_quality, self.stats = self._run()
+
+    # -------------------------------------------------------------------------
+    # Initialisation helpers
+    # -------------------------------------------------------------------------
+
+    def _precompute(self):
+        """Precompute per-image checksums and normalised shapes.
+
+        Checksums (sum of all pixel values) provide O(1) rejection of
+        non-duplicate pairs before the more expensive check_equality /
+        compute_mse calls.  Normalised shapes allow shape-based pre-filtering
+        without sorting inside hot worker loops.
+        """
+        self._checksums = {
+            k: float(np.sum(v)) for k, v in self._difpy_obj._tensor_dictionary.items()
+        }
+        self._norm_shapes = {
+            k: tuple(sorted(v))
+            for k, v in self._difpy_obj._id_to_shape_dictionary.items()
+        }
+
+    def _make_pool(self):
+        """Create a worker Pool pre-loaded with shared image data."""
+        return Pool(
+            processes=self._processes,
+            initializer=_init_worker,
+            initargs=(
+                self._difpy_obj._tensor_dictionary,
+                self._checksums,
+                self._norm_shapes,
+                self._similarity,
+                self._rotate,
+                self._same_dim,
+            ),
+        )
 
     def _run(self):
         """Execute the full search workflow."""
         start_time = datetime.now()
+
+        # Precompute checksums and shapes once before spawning workers.
+        self._precompute()
 
         if self._in_folder:
             result = self._search_infolder()
@@ -105,43 +236,112 @@ class search:
         return result, lower_quality, stats
 
     # -------------------------------------------------------------------------
+    # Pair generation helpers
+    # -------------------------------------------------------------------------
+
+    def _generate_pairs_same_dim(self, tensor_keys):
+        """Yield only pairs whose images share the same normalised shape.
+
+        Groups images by shape first, then emits combinations within each
+        group — avoiding the O(N²) cross-shape checks inside workers.
+        """
+        shape_groups: dict = defaultdict(list)
+        for key in tensor_keys:
+            shape_groups[self._norm_shapes[key]].append(key)
+        for group_keys in shape_groups.values():
+            if len(group_keys) >= 2:
+                yield from combinations(group_keys, 2)
+
+    def _generate_pairs(self, tensor_keys):
+        """Yield image ID pairs, respecting the same_dim setting."""
+        if self._same_dim:
+            yield from self._generate_pairs_same_dim(tensor_keys)
+        else:
+            yield from combinations(tensor_keys, 2)
+
+    def _yield_comparison_group(self):
+        """Yield batch groups for all images (large-dataset streaming)."""
+        tensor_keys = self._difpy_obj._tensor_dictionary
+        max_value = max(tensor_keys.keys())
+        missing_ids = set(range(max_value + 1)) - set(tensor_keys.keys())
+        for i in range(max_value):
+            if i in missing_ids:
+                continue
+            group = [
+                (i, j)
+                for j in range(i + 1, max_value)
+                if j not in missing_ids
+                and (not self._same_dim or self._norm_shapes[i] == self._norm_shapes[j])
+            ]
+            if group:
+                yield group
+
+    def _yield_comparison_group_for_ids(self, ids):
+        """Yield batch groups restricted to a specific set of image IDs.
+
+        Used by the in-folder large-dataset path to avoid comparing images
+        that belong to different folders.
+        """
+        sorted_ids = sorted(ids)
+        for i, id_A in enumerate(sorted_ids):
+            group = [
+                (id_A, id_B)
+                for id_B in sorted_ids[i + 1 :]
+                if not self._same_dim
+                or self._norm_shapes[id_A] == self._norm_shapes[id_B]
+            ]
+            if group:
+                yield group
+
+    # -------------------------------------------------------------------------
     # Union search (all directories merged)
     # -------------------------------------------------------------------------
 
     def _search_union(self):
-        """Perform search in the union of all directories."""
-        result_raw = []
-        self._count = 0
+        """Perform search across the union of all directories."""
         tensor_keys = list(self._difpy_obj._tensor_dictionary.keys())
+        result_raw = []
 
-        if len(tensor_keys) <= 5000:
-            id_combinations = list(combinations(tensor_keys, 2))
-            with Pool(processes=self._processes) as pool:
-                output = pool.map(self._find_matches, id_combinations)
-            for i in output:
-                if i:
-                    result_raw.append(i)
-            self._count += 1
-            if self._show_progress:
-                progress_bar(self._count, 1, task="searching files")
+        if len(tensor_keys) <= self._BATCH_THRESHOLD:
+            id_combinations = list(self._generate_pairs(tensor_keys))
+            total = len(id_combinations)
+            if total == 0:
+                return {}
+            chunksize = max(1, min(1000, total // max(1, self._processes * 4)))
+            with (
+                self._make_pool() as pool,
+                tqdm(
+                    total=total,
+                    desc="Searching images",
+                    unit="pair",
+                    disable=not self._show_progress,
+                ) as pbar,
+            ):
+                for match in pool.imap_unordered(
+                    _find_matches_worker, id_combinations, chunksize=chunksize
+                ):
+                    if match:
+                        result_raw.append(match)
+                    pbar.update()
         else:
             if self._chunksize is None:
-                self._chunksize = max(1, round(1000000 / len(tensor_keys)))
-            with Pool(processes=self._processes) as pool:
+                self._chunksize = max(1, round(1_000_000 / len(tensor_keys)))
+            with (
+                self._make_pool() as pool,
+                tqdm(
+                    total=len(tensor_keys) - 1,
+                    desc="Searching images",
+                    unit="batch",
+                    disable=not self._show_progress,
+                ) as pbar,
+            ):
                 for output in pool.imap_unordered(
-                    self._find_matches_batch,
+                    _find_matches_batch_worker,
                     self._yield_comparison_group(),
                     self._chunksize,
                 ):
-                    if len(output) > 0:
-                        result_raw = result_raw + output
-                    self._count += 1
-                    if self._show_progress:
-                        progress_bar(
-                            self._count,
-                            len(tensor_keys) - 1,
-                            task="searching files",
-                        )
+                    result_raw.extend(output)
+                    pbar.update()
 
         return self._group_result_union(result_raw)
 
@@ -150,127 +350,48 @@ class search:
     # -------------------------------------------------------------------------
 
     def _search_infolder(self):
-        """Perform search in isolated/separate directories."""
+        """Perform search within each directory in isolation."""
         result = []
         grouped_img_ids = list(self._difpy_obj._group_to_id_dictionary.values())
-        self._count = 0
 
-        with Pool(processes=self._processes) as pool:
+        with (
+            self._make_pool() as pool,
+            tqdm(
+                total=len(grouped_img_ids),
+                desc="Searching folders",
+                unit="folder",
+                disable=not self._show_progress,
+            ) as pbar,
+        ):
             for ids in grouped_img_ids:
-                if len(ids) <= 5000:
-                    id_combinations = list(combinations(ids, 2))
-                    output = pool.map(self._find_matches, id_combinations)
-                    for i in output:
-                        if i:
-                            result.append(i)
-                    self._count += 1
+                if len(ids) <= self._BATCH_THRESHOLD:
+                    id_combinations = list(self._generate_pairs(ids))
+                    if id_combinations:
+                        chunksize = max(
+                            1,
+                            min(
+                                500, len(id_combinations) // max(1, self._processes * 4)
+                            ),
+                        )
+                        for match in pool.imap_unordered(
+                            _find_matches_worker,
+                            id_combinations,
+                            chunksize=chunksize,
+                        ):
+                            if match:
+                                result.append(match)
                 else:
                     if self._chunksize is None:
-                        self._chunksize = max(1, round(1000000 / len(ids)))
+                        self._chunksize = max(1, round(1_000_000 / len(ids)))
                     for output in pool.imap_unordered(
-                        self._find_matches_batch,
-                        self._yield_comparison_group(),
+                        _find_matches_batch_worker,
+                        self._yield_comparison_group_for_ids(ids),
                         self._chunksize,
                     ):
-                        if len(output) > 0:
-                            result = result + output
-                    self._count += 1
-                if self._show_progress:
-                    progress_bar(
-                        self._count, len(grouped_img_ids), task="searching files"
-                    )
+                        result.extend(output)
+                pbar.update()
 
         return result
-
-    # -------------------------------------------------------------------------
-    # Match finding
-    # -------------------------------------------------------------------------
-
-    def _find_matches(self, ids):
-        """Search for a match between two images."""
-        id_A, id_B = ids
-        tensor_A = self._difpy_obj._tensor_dictionary[id_A]
-        tensor_B = self._difpy_obj._tensor_dictionary[id_B]
-        shape_A = self._difpy_obj._id_to_shape_dictionary[id_A]
-        shape_B = self._difpy_obj._id_to_shape_dictionary[id_B]
-
-        if self._same_dim:
-            if not compare_shape(shape_A, shape_B):
-                return False
-            if check_equality(tensor_A, tensor_B):
-                return (id_A, id_B, 0.0)
-            mse = compute_mse(tensor_A, tensor_B, rotate=self._rotate)
-            if mse <= self._similarity:
-                return (id_A, id_B, mse)
-        else:
-            if check_equality(tensor_A, tensor_B):
-                return (id_A, id_B, 0.0)
-            mse = compute_mse(tensor_A, tensor_B, rotate=self._rotate)
-            if mse <= self._similarity:
-                return (id_A, id_B, mse)
-
-    def _find_matches_batch(self, ids):
-        """Search for matches among images in batches (for large datasets)."""
-        result = []
-        id_A = ids[0][0]
-        tensor_A = self._difpy_obj._tensor_dictionary[id_A]
-        ids_B_list = np.asarray([x[1] for x in ids])
-        tensor_B_list = np.asarray([
-            self._difpy_obj._tensor_dictionary[x[1]] for x in ids
-        ])
-
-        if self._same_dim:
-            shape_A_list = [
-                sorted(self._difpy_obj._id_to_shape_dictionary[id_A])
-            ] * len(ids)
-            shape_B_list = [
-                sorted(self._difpy_obj._id_to_shape_dictionary[id_B])
-                for id_B in ids_B_list
-            ]
-            same_shape = np.equal(shape_A_list, shape_B_list).all(axis=1)
-            shape_index = np.where(same_shape)
-            if len(shape_index) > 0:
-                ids_B_list = ids_B_list[shape_index]
-                tensor_B_list = tensor_B_list[shape_index]
-
-        # Check for exact matches
-        sum_B_list = [np.sum(tensor_B) for tensor_B in tensor_B_list]
-        sum_A_list = [np.sum(tensor_A)] * len(sum_B_list)
-        equals = np.equal(sum_A_list, sum_B_list)
-
-        dupl_index = np.where(equals)
-        non_dupl_index = np.where(equals == False)
-
-        if len(dupl_index) > 0:
-            for id_B in ids_B_list[dupl_index]:
-                result.append((id_A, id_B, 0))
-            tensor_B_list = tensor_B_list[non_dupl_index]
-            ids_B_list = ids_B_list[non_dupl_index]
-
-        if self._similarity > 0:
-            mses = np.asarray([
-                compute_mse(tensor_A, tensor_B, rotate=self._rotate)
-                for tensor_B in tensor_B_list
-            ])
-            mse_index_sim = np.where(mses <= self._similarity)
-            if len(mse_index_sim) > 0:
-                for i, id_B in enumerate(ids_B_list[mse_index_sim]):
-                    result.append((id_A, id_B, mses[i]))
-
-        return result
-
-    def _yield_comparison_group(self):
-        """Yield lists of image ID pairs ready for batch comparison."""
-        max_value = max(self._difpy_obj._tensor_dictionary.keys())
-        missing_ids = set(range(max_value + 1)) - set(
-            self._difpy_obj._tensor_dictionary.keys()
-        )
-        for i in range(max_value):
-            if i in missing_ids:
-                continue
-            group = [(i, j) for j in range(i + 1, max_value) if j not in missing_ids]
-            if group:
-                yield group
 
     # -------------------------------------------------------------------------
     # Result formatting

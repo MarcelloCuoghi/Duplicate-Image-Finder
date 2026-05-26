@@ -3,16 +3,16 @@
 import os
 import warnings
 from datetime import datetime
-from glob import glob
 from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
+from tqdm import tqdm
 
 from dif_py._internal import validators
 from dif_py._internal.stats import build_stats as _generate_build_stats
-from dif_py._internal.utils import initialize_multiprocessing, progress_bar
+from dif_py._internal.utils import initialize_multiprocessing
 
 VALID_EXTENSIONS = frozenset([
     "apng",
@@ -110,7 +110,7 @@ class build:
         limit_extensions=True,
         px_size=50,
         show_progress=True,
-        processes=os.cpu_count(),
+        processes=None,
     ):
         self._directory = validators.validate_directory(directory)
         self._recursive = validators.validate_recursive(recursive)
@@ -118,6 +118,8 @@ class build:
         self._limit_extensions = validators.validate_limit_extensions(limit_extensions)
         self._px_size = validators.validate_px_size(px_size)
         self._show_progress = validators.validate_show_progress(show_progress)
+        if processes is None:
+            processes = os.cpu_count()
         self._processes = validators.validate_processes(processes)
 
         initialize_multiprocessing()
@@ -134,17 +136,9 @@ class build:
 
     def _run(self):
         """Execute the full build workflow."""
-        if self._show_progress:
-            count = 0
-            total_count = 3
-            progress_bar(count, total_count, task="preparing files")
-
         start_time = datetime.now()
 
         valid_files, skipped_files = self._get_files()
-        if self._show_progress:
-            count += 1
-            progress_bar(count, total_count, task="preparing files")
 
         (
             tensor_dictionary,
@@ -156,9 +150,6 @@ class build:
         ) = self._build_image_dictionaries(valid_files)
 
         end_time = datetime.now()
-        if self._show_progress:
-            count += 1
-            progress_bar(count, total_count, task="preparing files")
 
         stats = _generate_build_stats(
             total_files=len(filename_dictionary),
@@ -174,10 +165,6 @@ class build:
             processes=self._processes,
         )
 
-        if self._show_progress:
-            count += 1
-            progress_bar(count, total_count, task="preparing files")
-
         return (
             tensor_dictionary,
             id_to_shape_dictionary,
@@ -188,6 +175,27 @@ class build:
             stats,
         )
 
+    def _scan_directory(self, path: str):
+        """Yield normalized file paths with minimal syscalls.
+
+        Uses os.scandir for flat scans (avoids extra isdir calls per entry)
+        and os.walk for recursive scans (yields only files, no post-filter needed).
+        """
+        if os.path.isfile(path):
+            yield os.path.normpath(path)
+            return
+        if not os.path.isdir(path):
+            return
+        if self._recursive:
+            for root, _dirs, files in os.walk(path):
+                for f in files:
+                    yield os.path.normpath(os.path.join(root, f))
+        else:
+            with os.scandir(path) as it:
+                for entry in it:
+                    if entry.is_file():
+                        yield os.path.normpath(entry.path)
+
     def _get_files(self):
         """Search for files in the input directories."""
         valid_files_all = np.array([], dtype=object)
@@ -196,34 +204,18 @@ class build:
         if self._in_folder:
             folder_files = []
             for dir in self._directory:
-                if os.path.isdir(dir):
-                    pattern = str(dir) + "/**/*" if self._recursive else str(dir) + "/*"
-                    files = glob(pattern, recursive=self._recursive)
-                elif os.path.isfile(dir):
-                    files = [dir]
-                else:
-                    continue
-
-                files = [f for f in files if not os.path.isdir(f)]
+                files = list(self._scan_directory(dir))
                 valid_files, skip_files = self._validate_files(files)
                 if len(valid_files) > 0:
                     folder_files.append(valid_files)
                 if len(skip_files) > 0:
                     skipped_files_all = np.concatenate((skipped_files_all, skip_files))
-
             if folder_files:
                 valid_files_all = np.array(folder_files, dtype=object)
         else:
             all_files = []
             for dir in self._directory:
-                if os.path.isdir(dir):
-                    pattern = str(dir) + "/**/*" if self._recursive else str(dir) + "/*"
-                    files = glob(pattern, recursive=self._recursive)
-                    files = [f for f in files if not os.path.isdir(f)]
-                    all_files.extend(files)
-                elif os.path.isfile(dir):
-                    all_files.append(dir)
-
+                all_files.extend(self._scan_directory(dir))
             valid_files, skip_files = self._validate_files(all_files)
             valid_files_all = np.array(valid_files, dtype=object)
             if len(skip_files) > 0:
@@ -233,9 +225,8 @@ class build:
 
     def _validate_files(self, directory):
         """Validate file types from a list of paths."""
-        valid_files = np.array([
-            os.path.normpath(file) for file in directory if not os.path.isdir(file)
-        ])
+        # Paths from _scan_directory are already normalized and are files only.
+        valid_files = np.array(directory, dtype=object)
         if self._limit_extensions:
             valid_files, skip_files = self._filter_extensions(valid_files)
         else:
@@ -250,18 +241,12 @@ class build:
 
     def _filter_extensions(self, directory_files):
         """Filter files to keep only those with known image extensions."""
-        extensions = []
-        for file in directory_files:
-            try:
-                ext = file.rsplit(".", 1)[-1].lower()
-                extensions.append(ext)
-            except (IndexError, AttributeError):
-                extensions.append("_")
-
+        # os.path.splitext is more robust than rsplit and avoids try/except overhead.
+        # splitext returns ("file", "") for files without extension; ""[1:] == ""
+        # which is not in VALID_EXTENSIONS, so such files are correctly excluded.
+        extensions = [os.path.splitext(f)[1][1:].lower() for f in directory_files]
         mask = np.array([ext in VALID_EXTENSIONS for ext in extensions])
-        keep_files = directory_files[mask]
-        skip_files = directory_files[~mask]
-        return keep_files, skip_files
+        return directory_files[mask], directory_files[~mask]
 
     def _build_image_dictionaries(self, valid_files):
         """Build dictionaries of image tensors and metadata."""
@@ -274,16 +259,37 @@ class build:
         count = 0
 
         if self._in_folder:
-            for j in range(len(valid_files)):
-                group_id = f"group_{j}"
-                group_img_ids = []
-                with Pool(processes=self._processes) as pool:
+            total_files = sum(len(g) for g in valid_files)
+            chunksize = (
+                max(1, total_files // (self._processes * 4)) if total_files else 1
+            )
+            if self._show_progress:
+                tqdm.write("Loading images: starting worker pool...")
+            # Single Pool shared across all groups avoids repeated startup overhead.
+            with (
+                Pool(processes=self._processes) as pool,
+                tqdm(
+                    total=total_files,
+                    desc="Loading images",
+                    unit="img",
+                    disable=not self._show_progress,
+                ) as pbar,
+            ):
+                for j in range(len(valid_files)):
+                    group_id = f"group_{j}"
+                    group_img_ids = []
                     file_nums = [
                         (i, valid_files[j][i]) for i in range(len(valid_files[j]))
                     ]
-                    for output in pool.starmap(self._generate_tensor, file_nums):
+                    for output in pool.imap_unordered(
+                        self._generate_tensor, file_nums, chunksize=chunksize
+                    ):
                         if isinstance(output, dict):
                             invalid_files.update(output)
+                            for filepath, reason in output.items():
+                                tqdm.write(
+                                    f"Warning: could not load '{filepath}': {reason}"
+                                )
                         else:
                             img_id = count
                             filename_idx, tensor, shape = output
@@ -293,13 +299,32 @@ class build:
                             filename_dictionary[img_id] = valid_files[j][filename_idx]
                             tensor_dictionary[img_id] = tensor
                         count += 1
-                group_to_id_dictionary[group_id] = group_img_ids
+                        pbar.update()
+                    group_to_id_dictionary[group_id] = group_img_ids
         else:
-            with Pool(processes=self._processes) as pool:
-                file_nums = [(i, valid_files[i]) for i in range(len(valid_files))]
-                for output in pool.starmap(self._generate_tensor, file_nums):
+            n = len(valid_files)
+            chunksize = max(1, n // (self._processes * 4)) if n else 1
+            file_nums = [(i, valid_files[i]) for i in range(n)]
+            if self._show_progress:
+                tqdm.write("Loading images: starting worker pool...")
+            with (
+                Pool(processes=self._processes) as pool,
+                tqdm(
+                    total=n,
+                    desc="Loading images",
+                    unit="img",
+                    disable=not self._show_progress,
+                ) as pbar,
+            ):
+                for output in pool.imap_unordered(
+                    self._generate_tensor, file_nums, chunksize=chunksize
+                ):
                     if isinstance(output, dict):
                         invalid_files.update(output)
+                        for filepath, reason in output.items():
+                            tqdm.write(
+                                f"Warning: could not load '{filepath}': {reason}"
+                            )
                     else:
                         img_id = count
                         filename_idx, tensor, shape = output
@@ -307,6 +332,7 @@ class build:
                         filename_dictionary[img_id] = valid_files[filename_idx]
                         tensor_dictionary[img_id] = tensor
                     count += 1
+                    pbar.update()
 
         return (
             tensor_dictionary,
@@ -317,28 +343,32 @@ class build:
             invalid_files,
         )
 
-    def _generate_tensor(self, num: int, file: str) -> dict | tuple:
-        """Generate a compressed tensor from an image file."""
-        try:
-            warnings.simplefilter("error", UserWarning)
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
+    def _generate_tensor(self, args: tuple) -> dict | tuple:
+        """Generate a compressed tensor from an image file.
 
-            img = Image.open(file)
-            if img.getbands() != ("R", "G", "B"):
-                img = img.convert("RGB")
-            shape = np.asarray(img).shape
-            img = img.resize((self._px_size, self._px_size), resample=Image.BICUBIC)
-            img = np.asarray(img)
+        Accepts a (num, file) tuple to be compatible with imap_unordered.
+        """
+        num, file = args
+        try:
+            # catch_warnings isolates filter changes to this call and avoids
+            # growing the global filter list with duplicate entries on each invocation.
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", UserWarning)
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+
+                img = Image.open(file)
+                if img.getbands() != ("R", "G", "B"):
+                    img = img.convert("RGB")
+                w, h = img.size
+                shape = (h, w, 3)  # always RGB at this point
+                img = img.resize((self._px_size, self._px_size), resample=Image.BICUBIC)
+                img = np.asarray(img)
             return (num, img, shape)
         except Exception as e:
-            print(
-                f"Error {e.__class__.__name__} loading image #{num} : '{file}' -> {e}"
-            )
             if e.__class__.__name__ == "UnidentifiedImageError":
                 return {
                     str(
                         Path(file)
                     ): "UnidentifiedImageError: file could not be identified as image."
                 }
-            else:
-                return {str(Path(file)): str(e)}
+            return {str(Path(file)): f"{e.__class__.__name__}: {e}"}
