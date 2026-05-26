@@ -141,6 +141,19 @@ def validate_chunksize(chunksize) -> int | None:
     return chunksize
 
 
+def validate_color_space(color_space: str) -> str:
+    """Validate the 'color_space' parameter."""
+    if not isinstance(color_space, str):
+        raise TypeError(
+            'Invalid value for "color_space" parameter: must be of type STR.'
+        )
+    if color_space not in ("rgb", "gray"):
+        raise ValueError(
+            'Invalid value for "color_space" parameter: must be "rgb" or "gray".'
+        )
+    return color_space
+
+
 def validate_silent_del(silent_del: bool) -> bool:
     """Validate the 'silent_del' parameter."""
     if not isinstance(silent_del, bool):

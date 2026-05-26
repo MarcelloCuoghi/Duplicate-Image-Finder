@@ -109,6 +109,7 @@ class build:
         in_folder=False,
         limit_extensions=True,
         px_size=50,
+        color_space="gray",
         show_progress=True,
         processes=None,
     ):
@@ -117,6 +118,7 @@ class build:
         self._in_folder = validators.validate_in_folder(in_folder, recursive)
         self._limit_extensions = validators.validate_limit_extensions(limit_extensions)
         self._px_size = validators.validate_px_size(px_size)
+        self._color_space = validators.validate_color_space(color_space)
         self._show_progress = validators.validate_show_progress(show_progress)
         if processes is None:
             processes = os.cpu_count()
@@ -357,10 +359,15 @@ class build:
                 warnings.simplefilter("error", Image.DecompressionBombWarning)
 
                 img = Image.open(file)
-                if img.getbands() != ("R", "G", "B"):
-                    img = img.convert("RGB")
-                w, h = img.size
-                shape = (h, w, 3)  # always RGB at this point
+                if self._color_space == "gray":
+                    img = img.convert("L")
+                    w, h = img.size
+                    shape = (h, w)
+                else:
+                    if img.getbands() != ("R", "G", "B"):
+                        img = img.convert("RGB")
+                    w, h = img.size
+                    shape = (h, w, 3)
                 img = img.resize((self._px_size, self._px_size), resample=Image.BICUBIC)
                 img = np.asarray(img)
             return (num, img, shape)

@@ -59,6 +59,14 @@ def _command(
         int,
         typer.Option("-px", "--px-size", help="Compression size of images in pixels."),
     ] = 50,
+    color_space: Annotated[
+        str,
+        typer.Option(
+            "-cs",
+            "--color-space",
+            help="Color space for image comparison: 'gray' (grayscale, faster, recommended) or 'rgb'.",
+        ),
+    ] = "gray",
     similarity: Annotated[
         str,
         typer.Option(
@@ -151,6 +159,7 @@ def _command(
         in_folder=in_folder,
         limit_extensions=limit_extensions,
         px_size=px_size,
+        color_space=color_space,
         show_progress=show_progress,
         processes=processes,
     )
