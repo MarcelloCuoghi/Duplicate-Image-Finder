@@ -187,11 +187,5 @@ def _command(
     if delete:
         se.delete(silent_del=silent_del)
 
-
-def main() -> None:
-    """Entry point for the difPy CLI."""
-    app()
-
-
 if __name__ == "__main__":
-    main()
+    app()
